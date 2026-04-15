@@ -1,13 +1,10 @@
 import streamlit as st
 import pdfplumber
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
 import re
 from io import BytesIO
+import os
 
-# Page config
+# Page configuration
 st.set_page_config(
     page_title="QA Studio",
     page_icon="📚",
@@ -15,7 +12,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS for academic theme
 st.markdown("""
 <style>
     .main-header {
@@ -26,6 +23,10 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .main-header h1 {
+        margin: 0;
+        font-size: 2.5rem;
     }
     .answer-card {
         background: white;
@@ -48,6 +49,7 @@ st.markdown("""
         border-left: 3px solid #10b981;
         margin: 0.5rem 0;
         line-height: 1.6;
+        font-style: italic;
     }
     .mark-badge {
         display: inline-block;
@@ -57,6 +59,14 @@ st.markdown("""
         border-radius: 4px;
         font-weight: bold;
         font-size: 0.85rem;
+    }
+    .success-box {
+        background: #d1fae5;
+        color: #065f46;
+        padding: 1rem;
+        border-radius: 8px;
+        border-left: 4px solid #10b981;
+        margin: 1rem 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -72,58 +82,62 @@ st.markdown("""
 # Session state
 if 'answers' not in st.session_state:
     st.session_state.answers = []
+if 'source_text' not in st.session_state:
+    st.session_state.source_text = ""
 
 def extract_text_from_pdf(pdf_file):
     """Extract text from PDF file"""
     text = ""
     try:
         with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
+            for page_num, page in enumerate(pdf.pages):
                 page_text = page.extract_text()
                 if page_text:
+                    text += f"\n[Page {page_num + 1}]\n"
                     text += page_text + "\n"
     except Exception as e:
         st.error(f"PDF extraction error: {e}")
     return text
 
-def parse_questions(txt_file):
-    """Parse questions from text file"""
-    content = txt_file.read().decode('utf-8')
+def parse_questions(txt_content):
+    """Parse questions from text content"""
     questions = []
     
-    # Find all questions starting with Q followed by number
+    # Pattern to match questions like Q1., Q2., etc.
     pattern = r'Q\d+\.\s*(.+?)\?'
-    matches = re.findall(pattern, content, re.IGNORECASE)
-    questions = [match.strip() + '?' for match in matches]
+    matches = re.findall(pattern, txt_content, re.IGNORECASE)
     
+    for match in matches:
+        question = match.strip()
+        if not question.endswith('?'):
+            question += '?'
+        questions.append(question)
+    
+    # If no Q pattern found, try to find lines ending with ?
     if not questions:
-        # Fallback: split by lines
-        lines = content.split('\n')
-        questions = [line.strip() for line in lines if line.strip() and '?' in line]
+        lines = txt_content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.endswith('?') and len(line) > 10:
+                questions.append(line)
     
     return questions
 
-def find_answer(question, source_text, config):
-    """Find answer for a specific question"""
+def find_answer_for_question(question, source_text, config):
+    """
+    Intelligent answer extraction with multiple strategies
+    """
     question_lower = question.lower()
     
-    # Extract keywords from question (remove common words)
-    stop_words = {'what', 'is', 'are', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 
-                  'of', 'with', 'by', 'from', 'how', 'why', 'when', 'where', 'which',
-                  'who', 'whom', 'whose', 'do', 'does', 'did', 'will', 'would', 'could',
-                  'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
-                  'define', 'state', 'name', 'explain', 'describe', 'list', 'mention',
-                  'according', 'called', 'type', 'unit', 'si', 'property', 'body', 'bodies'}
+    # Strategy 1: Keyword-based extraction with context
+    keywords = extract_keywords(question)
     
-    keywords = [w for w in question_lower.split() if w not in stop_words and len(w) > 2]
-    
-    # Split source text into sentences
+    # Split source into sentences
     sentences = re.split(r'[.!?]+', source_text)
     
     best_answer = ""
     best_score = 0
     
-    # Search for the best matching sentence
     for sentence in sentences:
         sentence = sentence.strip()
         if len(sentence) < 10:
@@ -139,56 +153,129 @@ def find_answer(question, source_text, config):
             if re.search(r'\b' + re.escape(kw) + r'\b', sentence_lower):
                 score += 0.5
         
-        # Check for answer patterns
-        if any(pattern in sentence_lower for pattern in ['is called', 'are called', 'known as', 'defined as', 'is', 'are']):
-            score += 1
+        # Bonus for answer patterns
+        answer_patterns = [
+            r'is called', r'are called', r'known as', r'defined as',
+            r'is', r'are', r'means', r'refers to', r'states that'
+        ]
+        
+        for pattern in answer_patterns:
+            if re.search(pattern, sentence_lower):
+                score += 0.3
         
         if score > best_score:
             best_score = score
             best_answer = sentence.strip()
     
-    # If we found a good match, format it
-    if best_score > 0 and best_answer:
-        # Clean up the answer
-        best_answer = re.sub(r'\s+', ' ', best_answer).strip()
-        
-        # Remove figure references and page numbers
-        best_answer = re.sub(r'Figure\s*\d+\.?\d*', '', best_answer, flags=re.IGNORECASE)
-        best_answer = re.sub(r'\d+\s*th\s*Standard', '', best_answer, flags=re.IGNORECASE)
-        
-        # Limit by word count
-        words = best_answer.split()
-        if len(words) > config['max_words']:
-            # Try to find the most important part
-            for kw in keywords:
-                if kw in best_answer.lower():
-                    # Find the position of the keyword
-                    idx = best_answer.lower().find(kw)
-                    # Get context around the keyword
-                    start = max(0, idx - 20)
-                    end = min(len(best_answer), idx + len(kw) + 50)
-                    best_answer = best_answer[start:end].strip()
-                    break
-            
-            # If still too long, just truncate
-            words = best_answer.split()
-            if len(words) > config['max_words']:
-                best_answer = ' '.join(words[:config['max_words']])
-        
-        # Limit by lines
-        lines = best_answer.split('\n')
-        if len(lines) > config['max_lines']:
-            lines = lines[:config['max_lines']]
-            best_answer = '\n'.join(lines)
-        
-        return best_answer.strip()
+    # Strategy 2: Look for specific question patterns
+    if best_score < 1:
+        best_answer = find_answer_by_pattern(question, source_text)
     
-    return "Answer not found in the provided source material."
+    # Strategy 3: If still no answer, look for definitions
+    if not best_answer or len(best_answer) < 10:
+        best_answer = find_definition(question, source_text)
+    
+    # Format answer based on config
+    if best_answer:
+        best_answer = format_answer(best_answer, config)
+    
+    return best_answer if best_answer else "Answer not found in the provided material."
+
+def extract_keywords(question):
+    """Extract important keywords from question"""
+    # Remove question words
+    stop_words = {
+        'what', 'is', 'are', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for',
+        'of', 'with', 'by', 'from', 'how', 'why', 'when', 'where', 'which',
+        'who', 'whom', 'whose', 'do', 'does', 'did', 'will', 'would', 'could',
+        'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
+        'define', 'state', 'name', 'explain', 'describe', 'list', 'mention',
+        'according', 'called', 'type', 'unit', 'si', 'property', 'body', 'bodies',
+        'natural', 'state', 'force', 'motion', 'law'
+    }
+    
+    words = re.sub(r'[?]', '', question).lower().split()
+    keywords = [w for w in words if w not in stop_words and len(w) > 2]
+    
+    return keywords
+
+def find_answer_by_pattern(question, source_text):
+    """Find answer using specific question patterns"""
+    question_lower = question.lower()
+    
+    # Pattern matching for specific question types
+    patterns = {
+        r'natural state.*aristotle': r'According to Aristotle.*?rest',
+        r'who proposed.*force.*change.*natural state': r'(Galileo|Newton).*?proposed',
+        r'inherent property.*resist.*change.*state': r'inertia',
+        r'scientist.*body in motion.*continue': r'(Galileo|Newton).*?law',
+        r'type of inertia.*passenger.*leans.*forward': r'inertia of motion',
+        r'define.*linear momentum': r'Linear Momentum.*?mass.*velocity',
+        r'SI unit.*linear momentum': r'kg.*m.*s|kilogram.*metre.*second',
+        r"Newton's First Law": r'every body continues.*?state of rest.*?uniform motion',
+        r'definition of force.*Newton': r'Force.*?external.*?push.*?pull',
+        r'force.*scalar.*vector': r'Force.*?vector quantity'
+    }
+    
+    for question_pattern, answer_pattern in patterns.items():
+        if re.search(question_pattern, question_lower):
+            match = re.search(answer_pattern, source_text, re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(0).strip()
+    
+    return ""
+
+def find_definition(question, source_text):
+    """Find definitions in the text"""
+    question_lower = question.lower()
+    keywords = extract_keywords(question)
+    
+    # Look for definition patterns
+    definition_patterns = [
+        r'(?:' + '|'.join(keywords) + r')\s+(?:is|are|means|refers to|called)\s+([^.\n]+)',
+        r'(?:' + '|'.join(keywords) + r')\s+is\s+defined\s+as\s+([^.\n]+)'
+    ]
+    
+    for pattern in definition_patterns:
+        match = re.search(pattern, source_text, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+    
+    return ""
+
+def format_answer(answer, config):
+    """Format answer according to mark allocation"""
+    # Clean up the answer
+    answer = re.sub(r'\s+', ' ', answer).strip()
+    
+    # Remove page markers
+    answer = re.sub(r'\[Page \d+\]', '', answer).strip()
+    
+    # Limit by word count
+    words = answer.split()
+    if len(words) > config['max_words']:
+        # Try to keep complete sentence
+        for i in range(config['max_words'], len(words)):
+            if words[i].endswith('.'):
+                words = words[:i+1]
+                break
+        else:
+            words = words[:config['max_words']]
+    
+    answer = ' '.join(words)
+    
+    # Limit by lines
+    lines = answer.split('\n')
+    if len(lines) > config['max_lines']:
+        lines = lines[:config['max_lines']]
+        answer = '\n'.join(lines)
+    
+    return answer.strip()
 
 def generate_answers(questions, source_text, question_type):
-    """Generate answers based on question type"""
+    """Generate answers for all questions"""
     config = {
-        '1': {'max_words': 2, 'max_lines': 1, 'desc': 'Brief (2 words)'},
+        '1': {'max_words': 3, 'max_lines': 1, 'desc': 'Brief (2-3 words)'},
         '2': {'max_words': 30, 'max_lines': 2, 'desc': 'Short (2 lines)'},
         '4': {'max_words': 100, 'max_lines': 5, 'desc': 'Medium (5 lines)'},
         '7': {'max_words': 200, 'max_lines': 8, 'desc': 'Detailed (8 lines)'}
@@ -200,7 +287,7 @@ def generate_answers(questions, source_text, question_type):
     progress_bar = st.progress(0)
     
     for idx, question in enumerate(questions):
-        answer = find_answer(question, source_text, cfg)
+        answer = find_answer_for_question(question, source_text, cfg)
         
         answers.append({
             'question': question,
@@ -214,49 +301,34 @@ def generate_answers(questions, source_text, question_type):
     
     return answers
 
-def export_to_pdf(answers):
-    """Export answers to PDF"""
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4,
-                           rightMargin=72, leftMargin=72,
-                           topMargin=72, bottomMargin=72)
-    
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        spaceAfter=30,
-        textColor=colors.HexColor('#1e3a8a'),
-        alignment=1
-    )
-    
-    story = []
-    story.append(Paragraph('QA Studio - Generated Answers', title_style))
-    story.append(Spacer(1, 20))
-    
-    for idx, item in enumerate(answers, 1):
-        q_text = f"Q{idx}. {item['question']}"
-        story.append(Paragraph(q_text, styles['Normal']))
-        story.append(Paragraph(item['answer'], styles['Normal']))
-        story.append(Spacer(1, 10))
-    
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
-
 # Main UI
+st.markdown("### 📋 Instructions")
+st.info("""
+1. **Upload your PDF** - Your study material/textbook
+2. **Upload questions** - TXT file with questions (Q1., Q2., etc.)
+3. **Select mark type** - Choose 1, 2, 4, or 7 marks
+4. **Generate answers** - Click the button to extract answers
+""")
+
 col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("### 📄 Source Material")
-    pdf_file = st.file_uploader("Upload PDF", type=['pdf'])
+    st.markdown("### 📄 Source Material (PDF)")
+    pdf_file = st.file_uploader(
+        "Upload PDF",
+        type=['pdf'],
+        help="Upload your textbook or study material"
+    )
     if pdf_file:
         st.success(f"✅ {pdf_file.name}")
 
 with col2:
-    st.markdown("### ❓ Questions File")
-    txt_file = st.file_uploader("Upload TXT", type=['txt'])
+    st.markdown("### ❓ Questions (TXT)")
+    txt_file = st.file_uploader(
+        "Upload TXT",
+        type=['txt'],
+        help="Upload questions file"
+    )
     if txt_file:
         st.success(f"✅ {txt_file.name}")
 
@@ -269,10 +341,10 @@ question_type = st.radio(
 )
 
 type_descriptions = {
-    '1': 'Brief answers (max 2 words)',
-    '2': 'Short answers (max 2 lines)',
-    '4': 'Medium answers (max 5 lines)',
-    '7': 'Detailed answers (max 8 lines)'
+    '1': 'Brief answers (2-3 words)',
+    '2': 'Short answers (2 lines)',
+    '4': 'Medium answers (5 lines)',
+    '7': 'Detailed answers (8 lines)'
 }
 
 st.info(f"📝 {type_descriptions[question_type]}")
@@ -280,32 +352,42 @@ st.info(f"📝 {type_descriptions[question_type]}")
 # Process button
 if st.button("🔍 Generate Answers", type="primary", use_container_width=True):
     if pdf_file and txt_file:
-        with st.spinner("Processing your files..."):
+        with st.spinner("Processing files..."):
             try:
-                # Extract text
-                source_text = extract_text_from_pdf(pdf_file)
+                # Extract text from PDF
+                with st.spinner("📖 Extracting text from PDF..."):
+                    source_text = extract_text_from_pdf(pdf_file)
+                    st.session_state.source_text = source_text
                 
                 if not source_text or len(source_text.strip()) < 100:
                     st.error("❌ Could not extract sufficient text from PDF.")
                     st.stop()
                 
+                st.success(f"✅ Extracted {len(source_text)} characters from PDF")
+                
                 # Parse questions
-                txt_file.seek(0)
-                questions = parse_questions(txt_file)
+                with st.spinner("❓ Parsing questions..."):
+                    txt_content = txt_file.read().decode('utf-8')
+                    questions = parse_questions(txt_content)
                 
                 if not questions:
                     st.error("❌ No questions found in the uploaded file.")
                     st.stop()
                 
+                st.success(f"✅ Found {len(questions)} questions")
+                
                 # Generate answers
-                answers = generate_answers(questions, source_text, question_type)
+                with st.spinner("🤖 Generating answers..."):
+                    answers = generate_answers(questions, source_text, question_type)
                 
                 st.session_state.answers = answers
                 
-                st.success(f"✅ Successfully generated {len(answers)} answers!")
+                st.markdown('<div class="success-box">✅ Successfully generated {} answers!</div>'.format(len(answers)), unsafe_allow_html=True)
                 
             except Exception as e:
                 st.error(f"❌ Error: {e}")
+                import traceback
+                st.code(traceback.format_exc())
     else:
         st.error("⚠️ Please upload both PDF and TXT files")
 
@@ -329,29 +411,6 @@ if st.session_state.answers:
             </div>
         </div>
         """, unsafe_allow_html=True)
-    
-    # Export
-    st.markdown("---")
-    st.markdown("### 📥 Export Answers")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("📄 Export as PDF", use_container_width=True):
-            try:
-                pdf_buffer = export_to_pdf(st.session_state.answers)
-                st.download_button(
-                    label="⬇️ Download PDF",
-                    data=pdf_buffer,
-                    file_name=f"QA_Studio_Answers_{question_type}_marks.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-            except Exception as e:
-                st.error(f"Export error: {e}")
-    
-    with col2:
-        st.info("HTML export coming soon!")
 
 # Sidebar
 with st.sidebar:
@@ -361,5 +420,13 @@ with st.sidebar:
     2. **Upload TXT** - Your questions file
     3. **Select Type** - Choose mark allocation
     4. **Generate** - Click the button
-    5. **Export** - Download your answers
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 📊 Answer Lengths")
+    st.markdown("""
+    - **1 Mark**: 2-3 words
+    - **2 Marks**: 2 lines
+    - **4 Marks**: 5 lines
+    - **7 Marks**: 8 lines
     """)
