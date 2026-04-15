@@ -4,7 +4,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
-import os
 import re
 from io import BytesIO
 
@@ -16,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for academic theme
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -28,16 +27,12 @@ st.markdown("""
         margin-bottom: 2rem;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    .main-header h1 {
-        margin: 0;
-        font-size: 2.5rem;
-    }
     .answer-card {
         background: white;
         padding: 1.5rem;
         border-radius: 8px;
         margin: 1rem 0;
-        border-left: 4px solid #3b82f6;
+        border-left: 4px solid #10b981;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     .question-text {
@@ -47,7 +42,7 @@ st.markdown("""
         margin-bottom: 0.5rem;
     }
     .answer-text {
-        background: #f0f9ff;
+        background: #f0fdf4;
         padding: 1rem;
         border-radius: 4px;
         border-left: 3px solid #10b981;
@@ -63,14 +58,6 @@ st.markdown("""
         font-weight: bold;
         font-size: 0.85rem;
     }
-    .success-msg {
-        background: #d1fae5;
-        color: #065f46;
-        padding: 1rem;
-        border-radius: 8px;
-        border-left: 4px solid #10b981;
-        margin: 1rem 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -82,23 +69,18 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Session state initialization
+# Session state
 if 'answers' not in st.session_state:
     st.session_state.answers = []
-if 'question_type' not in st.session_state:
-    st.session_state.question_type = '1'
-if 'source_text' not in st.session_state:
-    st.session_state.source_text = ''
 
 def extract_text_from_pdf(pdf_file):
     """Extract text from PDF file"""
     text = ""
     try:
         with pdfplumber.open(pdf_file) as pdf:
-            for page_num, page in enumerate(pdf.pages):
+            for page in pdf.pages:
                 page_text = page.extract_text()
                 if page_text:
-                    text += f"\n--- Page {page_num + 1} ---\n"
                     text += page_text + "\n"
     except Exception as e:
         st.error(f"PDF extraction error: {e}")
@@ -107,165 +89,101 @@ def extract_text_from_pdf(pdf_file):
 def parse_questions(txt_file):
     """Parse questions from text file"""
     content = txt_file.read().decode('utf-8')
-    
-    # Try different question patterns
-    patterns = [
-        r'Q\d+[:\.\s]+(.+?)(?=\nQ\d+|\n\n|\Z)',  # Q1. or Q1:
-        r'\d+\.\s+(.+?)(?=\n\d+\.|\n\n|\Z)',     # 1. Question
-        r'^(.+?\?)\s*$'                          # Lines ending with ?
-    ]
-    
     questions = []
-    for pattern in patterns:
-        questions = re.findall(pattern, content, re.MULTILINE | re.DOTALL)
-        if questions:
-            questions = [q.strip() for q in questions if q.strip() and '?' in q]
-            break
     
-    # Fallback: split by lines and find questions
+    # Find all questions starting with Q followed by number
+    pattern = r'Q\d+\.\s*(.+?)\?'
+    matches = re.findall(pattern, content, re.IGNORECASE)
+    questions = [match.strip() + '?' for match in matches]
+    
     if not questions:
+        # Fallback: split by lines
         lines = content.split('\n')
-        questions = [line.strip() for line in lines 
-                    if line.strip() and ('?' in line or line.strip().startswith('Q'))]
-    
-    # Remove duplicates and clean up
-    questions = list(dict.fromkeys(questions))
-    questions = [q for q in questions if len(q) > 5]
+        questions = [line.strip() for line in lines if line.strip() and '?' in line]
     
     return questions
 
-def extract_keywords(question):
-    """Extract important keywords from question"""
-    # Remove question words and common words
-    stop_words = {
-        'what', 'is', 'are', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 
-        'of', 'with', 'by', 'from', 'how', 'why', 'when', 'where', 'which',
-        'who', 'whom', 'whose', 'do', 'does', 'did', 'will', 'would', 'could',
-        'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
-        'define', 'state', 'name', 'explain', 'describe', 'list', 'mention'
-    }
+def find_answer(question, source_text, config):
+    """Find answer for a specific question"""
+    question_lower = question.lower()
     
-    # Remove question mark and split
-    words = re.sub(r'[?]', '', question).lower().split()
-    keywords = [w for w in words if w not in stop_words and len(w) > 2]
+    # Extract keywords from question (remove common words)
+    stop_words = {'what', 'is', 'are', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 
+                  'of', 'with', 'by', 'from', 'how', 'why', 'when', 'where', 'which',
+                  'who', 'whom', 'whose', 'do', 'does', 'did', 'will', 'would', 'could',
+                  'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
+                  'define', 'state', 'name', 'explain', 'describe', 'list', 'mention',
+                  'according', 'called', 'type', 'unit', 'si', 'property', 'body', 'bodies'}
     
-    return keywords
-
-def find_answer_in_text(question, source_text, config):
-    """Find answer for the question in source text"""
-    keywords = extract_keywords(question)
+    keywords = [w for w in question_lower.split() if w not in stop_words and len(w) > 2]
     
-    if not keywords:
-        return "Unable to find answer - insufficient keywords"
-    
-    # Split source into sections (by double newlines or page breaks)
-    sections = re.split(r'\n\s*\n|--- Page \d+ ---', source_text)
+    # Split source text into sentences
+    sentences = re.split(r'[.!?]+', source_text)
     
     best_answer = ""
     best_score = 0
-    best_context = ""
     
-    # Search in each section
-    for section in sections:
-        section = section.strip()
-        if len(section) < 50:  # Skip very short sections
+    # Search for the best matching sentence
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if len(sentence) < 10:
             continue
         
-        section_lower = section.lower()
-        question_lower = question.lower()
+        sentence_lower = sentence.lower()
         
         # Count keyword matches
-        keyword_matches = sum(1 for kw in keywords if kw in section_lower)
-        score = keyword_matches / len(keywords) if keywords else 0
+        score = sum(1 for kw in keywords if kw in sentence_lower)
         
-        # Check for exact phrase matches
+        # Bonus for exact phrase matches
         for kw in keywords:
-            if re.search(r'\b' + re.escape(kw) + r'\b', section_lower):
-                score += 0.2
+            if re.search(r'\b' + re.escape(kw) + r'\b', sentence_lower):
+                score += 0.5
         
-        # Bonus for sections that contain answer-like patterns
-        answer_patterns = [
-            r'is\s+\w+',
-            r'are\s+\w+',
-            r'called\s+\w+',
-            r'defined\s+as',
-            r'means\s+',
-            r'refers\s+to',
-        ]
-        
-        for pattern in answer_patterns:
-            if re.search(pattern, section_lower):
-                score += 0.1
+        # Check for answer patterns
+        if any(pattern in sentence_lower for pattern in ['is called', 'are called', 'known as', 'defined as', 'is', 'are']):
+            score += 1
         
         if score > best_score:
             best_score = score
-            best_context = section
+            best_answer = sentence.strip()
     
-    # If we found a relevant section, extract the answer
-    if best_score > 0.3 and best_context:
-        # Try to find the most relevant sentence
-        sentences = re.split(r'[.!?]+', best_context)
+    # If we found a good match, format it
+    if best_score > 0 and best_answer:
+        # Clean up the answer
+        best_answer = re.sub(r'\s+', ' ', best_answer).strip()
         
-        best_sentence = ""
-        best_sentence_score = 0
+        # Remove figure references and page numbers
+        best_answer = re.sub(r'Figure\s*\d+\.?\d*', '', best_answer, flags=re.IGNORECASE)
+        best_answer = re.sub(r'\d+\s*th\s*Standard', '', best_answer, flags=re.IGNORECASE)
         
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if len(sentence) < 10:
-                continue
+        # Limit by word count
+        words = best_answer.split()
+        if len(words) > config['max_words']:
+            # Try to find the most important part
+            for kw in keywords:
+                if kw in best_answer.lower():
+                    # Find the position of the keyword
+                    idx = best_answer.lower().find(kw)
+                    # Get context around the keyword
+                    start = max(0, idx - 20)
+                    end = min(len(best_answer), idx + len(kw) + 50)
+                    best_answer = best_answer[start:end].strip()
+                    break
             
-            sentence_lower = sentence.lower()
-            sent_score = sum(1 for kw in keywords if kw in sentence_lower)
-            
-            if sent_score > best_sentence_score:
-                best_sentence_score = sent_score
-                best_sentence = sentence
+            # If still too long, just truncate
+            words = best_answer.split()
+            if len(words) > config['max_words']:
+                best_answer = ' '.join(words[:config['max_words']])
         
-        # Use the best sentence or the whole context
-        if best_sentence and len(best_sentence) > 20:
-            best_answer = best_sentence.strip()
-        else:
-            # Extract first few lines from context
-            lines = best_context.split('\n')
-            relevant_lines = []
-            for line in lines:
-                line = line.strip()
-                if any(kw in line.lower() for kw in keywords):
-                    relevant_lines.append(line)
-                    if len(relevant_lines) >= config['max_lines']:
-                        break
-            
-            if relevant_lines:
-                best_answer = ' '.join(relevant_lines)
-            else:
-                best_answer = best_context.split('\n')[0] if best_context.split('\n') else best_context
-    
-    # If no good answer found
-    if not best_answer or best_score < 0.3:
-        # Try a different approach - look for definitions
-        definition_pattern = r'(?:' + '|'.join(keywords) + r')\s+(?:is|are|means|refers to|called)\s+([^.\n]+)'
-        match = re.search(definition_pattern, source_text, re.IGNORECASE)
+        # Limit by lines
+        lines = best_answer.split('\n')
+        if len(lines) > config['max_lines']:
+            lines = lines[:config['max_lines']]
+            best_answer = '\n'.join(lines)
         
-        if match:
-            best_answer = match.group(0).strip()
-        else:
-            return "Answer not found in the provided source material. Please check if the PDF contains relevant content."
+        return best_answer.strip()
     
-    # Format answer according to config
-    words = best_answer.split()
-    
-    # Limit by word count
-    if config['max_words'] and len(words) > config['max_words']:
-        words = words[:config['max_words']]
-        best_answer = ' '.join(words)
-    
-    # Limit by lines
-    lines = best_answer.split('\n')
-    if config['max_lines'] and len(lines) > config['max_lines']:
-        lines = lines[:config['max_lines']]
-        best_answer = '\n'.join(lines)
-    
-    return best_answer.strip()
+    return "Answer not found in the provided source material."
 
 def generate_answers(questions, source_text, question_type):
     """Generate answers based on question type"""
@@ -282,7 +200,7 @@ def generate_answers(questions, source_text, question_type):
     progress_bar = st.progress(0)
     
     for idx, question in enumerate(questions):
-        answer = find_answer_in_text(question, source_text, cfg)
+        answer = find_answer(question, source_text, cfg)
         
         answers.append({
             'question': question,
@@ -292,7 +210,6 @@ def generate_answers(questions, source_text, question_type):
             'marks': question_type
         })
         
-        # Update progress
         progress_bar.progress((idx + 1) / len(questions))
     
     return answers
@@ -333,21 +250,13 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("### 📄 Source Material")
-    pdf_file = st.file_uploader(
-        "Upload PDF",
-        type=['pdf'],
-        help="Upload your study material or textbook"
-    )
+    pdf_file = st.file_uploader("Upload PDF", type=['pdf'])
     if pdf_file:
         st.success(f"✅ {pdf_file.name}")
 
 with col2:
     st.markdown("### ❓ Questions File")
-    txt_file = st.file_uploader(
-        "Upload TXT",
-        type=['txt'],
-        help="Upload your questions in text format"
-    )
+    txt_file = st.file_uploader("Upload TXT", type=['txt'])
     if txt_file:
         st.success(f"✅ {txt_file.name}")
 
@@ -356,8 +265,7 @@ st.markdown("### 📊 Question Type")
 question_type = st.radio(
     "Select mark allocation:",
     ["1", "2", "4", "7"],
-    horizontal=True,
-    help="Choose the type of questions to generate answers for"
+    horizontal=True
 )
 
 type_descriptions = {
@@ -372,43 +280,32 @@ st.info(f"📝 {type_descriptions[question_type]}")
 # Process button
 if st.button("🔍 Generate Answers", type="primary", use_container_width=True):
     if pdf_file and txt_file:
-        with st.spinner("Processing your files... This may take a moment."):
+        with st.spinner("Processing your files..."):
             try:
-                # Extract text from PDF
-                with st.spinner("📖 Extracting text from PDF..."):
-                    source_text = extract_text_from_pdf(pdf_file)
-                    st.session_state.source_text = source_text
+                # Extract text
+                source_text = extract_text_from_pdf(pdf_file)
                 
                 if not source_text or len(source_text.strip()) < 100:
-                    st.error("❌ Could not extract sufficient text from PDF. Please check the file.")
+                    st.error("❌ Could not extract sufficient text from PDF.")
                     st.stop()
                 
-                st.success(f"✅ Extracted {len(source_text)} characters from PDF")
-                
                 # Parse questions
-                with st.spinner("❓ Parsing questions..."):
-                    txt_file.seek(0)  # Reset file pointer
-                    questions = parse_questions(txt_file)
+                txt_file.seek(0)
+                questions = parse_questions(txt_file)
                 
                 if not questions:
                     st.error("❌ No questions found in the uploaded file.")
                     st.stop()
                 
-                st.success(f"✅ Found {len(questions)} questions")
-                
                 # Generate answers
-                with st.spinner("🤖 Generating answers..."):
-                    answers = generate_answers(questions, source_text, question_type)
+                answers = generate_answers(questions, source_text, question_type)
                 
                 st.session_state.answers = answers
-                st.session_state.question_type = question_type
                 
-                st.markdown('<div class="success-msg">✅ Successfully generated {} answers!</div>'.format(len(answers)), unsafe_allow_html=True)
+                st.success(f"✅ Successfully generated {len(answers)} answers!")
                 
             except Exception as e:
-                st.error(f"❌ Error processing files: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+                st.error(f"❌ Error: {e}")
     else:
         st.error("⚠️ Please upload both PDF and TXT files")
 
@@ -433,7 +330,7 @@ if st.session_state.answers:
         </div>
         """, unsafe_allow_html=True)
     
-    # Export section
+    # Export
     st.markdown("---")
     st.markdown("### 📥 Export Answers")
     
@@ -466,15 +363,3 @@ with st.sidebar:
     4. **Generate** - Click the button
     5. **Export** - Download your answers
     """)
-    
-    st.markdown("---")
-    st.markdown("### 📊 Answer Lengths")
-    st.markdown("""
-    - **1 Mark**: Max 2 words
-    - **2 Marks**: Max 2 lines
-    - **4 Marks**: Max 5 lines
-    - **7 Marks**: Max 8 lines
-    """)
-    
-    st.markdown("---")
-    st.caption("QA Studio v1.0 | Built for Academic Excellence")
